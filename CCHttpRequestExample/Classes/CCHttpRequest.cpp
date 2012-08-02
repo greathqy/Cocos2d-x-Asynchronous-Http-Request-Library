@@ -1,9 +1,22 @@
-//
-//  HttpRequest.cpp
-//
-//  Created by qingyun on 12-7-29.
-//  Copyright (c) 2012年 __MyCompanyName__. All rights reserved.
-//
+/**************************************************************************** 
+ Permission is hereby granted, free of charge, to any person obtaining a copy
+ of this software and associated documentation files (the "Software"), to deal
+ in the Software without restriction, including without limitation the rights
+ to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ copies of the Software, and to permit persons to whom the Software is
+ furnished to do so, subject to the following conditions:
+ 
+ The above copyright notice and this permission notice shall be included in
+ all copies or substantial portions of the Software.
+ 
+ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ THE SOFTWARE.
+ ****************************************************************************/
 
 #include "CCHttpRequest.h"
 #include <queue>
@@ -42,6 +55,7 @@ static CCHttpRequest *_g_singleton_httprequest = NULL;
 static char errorBuffer[CURL_ERROR_SIZE];
 typedef size_t (*write_callback)(void *ptr, size_t size, size_t nmemb, void *stream);
 
+//callback function used by libcurl for save file
 size_t writeFile(void *ptr, size_t size, size_t nmemb, void *stream)
 {
     int written = fwrite(ptr, size, nmemb, (FILE *)stream);
@@ -49,6 +63,7 @@ size_t writeFile(void *ptr, size_t size, size_t nmemb, void *stream)
     return written;
 }
 
+//callback function used by libcurl for collect response data
 size_t writeData(void *ptr, size_t size, size_t nmemb, void *stream)
 {
     std::string *str = (std::string *)stream;
@@ -89,6 +104,7 @@ static void *requestThread(void *data)
     HttpRequestPacket *req = NULL;
     
     while (true) {
+        //Wait for http request tasks from main thread
         int semWaitRet = sem_wait(s_pSem);
         if (semWaitRet < 0) {
             CCLog("HttpRequest async thread semaphore error: %s\n", strerror(errno));
@@ -96,7 +112,7 @@ static void *requestThread(void *data)
         }
         
         std::queue<HttpRequestPacket *> *pQueue = s_requestQueue;
-        pthread_mutex_lock(&s_requestQueueMutex);
+        pthread_mutex_lock(&s_requestQueueMutex); //Get request task from queue
         if (pQueue->empty()) {
             pthread_mutex_unlock(&s_requestQueueMutex);
             
@@ -116,24 +132,25 @@ static void *requestThread(void *data)
             pthread_mutex_unlock(&s_requestQueueMutex);
         }
         
+        //Create a response packet and assume it will successed
         HttpResponsePacket *responsePacket = new HttpResponsePacket();
         responsePacket->request = req;
         responsePacket->succeed = true;
 
         //Process the request
-        if (req->reqType == kHttpRequestGet) {
+        if (req->reqType == kHttpRequestGet) { //Get Request
             int32_t ret = processGetTask(req, writeData, &responsePacket->responseData, &responsePacket->responseCode);
             if (ret != 0) {
                 responsePacket->succeed = false;
                 responsePacket->responseData = errorBuffer;
             }
-        } else if (req->reqType == kHttpRequestPost) {
+        } else if (req->reqType == kHttpRequestPost) { //Post Request
             int32_t ret = processPostTask(req, writeData, &responsePacket->responseData, &responsePacket->responseCode);
             if (ret != 0) {
                 responsePacket->succeed = false;
                 responsePacket->responseData = errorBuffer;
             }
-        } else if (req->reqType == kHttpRequestDownloadFile) {
+        } else if (req->reqType == kHttpRequestDownloadFile) { //Download File Request
             bool fullyDownloaded = true;
             std::vector<std::string>::iterator iter;
             std::string saveFileName;
@@ -149,6 +166,8 @@ static void *requestThread(void *data)
                     saveFileName = needDownload;
                 }
                 
+                //If the download url is http://www.xxx.com/yyy.html
+                //The saved file name must be yyy.html
                 saveFileName = CCFileUtils::sharedFileUtils()->getWriteablePath() + saveFileName;
                 FILE *handle = fopen(saveFileName.c_str(), "w+");
                 if (!handle) {
@@ -166,6 +185,7 @@ static void *requestThread(void *data)
                 }
             }
             
+            //Only consider download task successfully when all the files downloaded
             if (!fullyDownloaded) {
                 responsePacket->succeed = false;
                 responsePacket->responseData = errorBuffer;
@@ -177,6 +197,7 @@ static void *requestThread(void *data)
         pthread_mutex_unlock(&s_responseQueueMutex);
     }
     
+    //If worker thread received quit signal, clean up un-completed request queue
     releaseRequestQueue();
     
     if (s_pSem != NULL) {
@@ -221,7 +242,7 @@ void releaseRequestQueue()
     pthread_mutex_unlock(&s_requestQueueMutex);
 }
 
-//Reuse configure CURL
+//Configure curl's timeout property
 bool configureCURL(CURL *handle)
 {
     if (!handle) {
@@ -384,6 +405,7 @@ bool CCHttpRequest::lazyInitThreadSemphore()
         pthread_mutex_init(&s_responseQueueMutex, NULL);
         
         pthread_create(&s_requestThread, NULL, requestThread, NULL);
+        pthread_detach(s_requestThread);
         
         need_quit = false;
     }
@@ -495,6 +517,7 @@ void CCHttpRequest::httpRequestCallback(float delta)
     } else {
         HttpResponsePacket *packet = pQueue->front();
         pQueue->pop();
+  
         pthread_mutex_unlock(&s_responseQueueMutex);
         
         --s_asyncRequestCount;
